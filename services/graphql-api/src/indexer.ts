@@ -178,8 +178,21 @@ export class PoolIndexer {
       if (position) changedPositions.push(position);
     }
     if (event.type === "remove_liquidity" || event.type === "burn_pos") {
-      stats.reserveA = Math.max(0, stats.reserveA - toNumber(event.payload["amountA"] ?? event.payload["amount_a"]));
-      stats.reserveB = Math.max(0, stats.reserveB - toNumber(event.payload["amountB"] ?? event.payload["amount_b"]));
+      const isOneSided = Boolean(event.payload["oneSided"] || event.payload["one_sided"]) ||
+        ("total_out" in event.payload && !("amountA" in event.payload) && !("amountB" in event.payload));
+      if (isOneSided) {
+        const totalOut = toNumber(event.payload["total_out"] ?? event.payload["amount_out"] ?? event.payload["amount"]);
+        const tokenOut = toStr(event.payload["token_out"] ?? event.payload["tokenOut"]);
+        const isTokenB = tokenOut === stats.tokenB || (config && tokenOut === config.tokenB) || tokenOut === "1";
+        if (isTokenB) {
+          stats.reserveB = Math.max(0, stats.reserveB - totalOut);
+        } else {
+          stats.reserveA = Math.max(0, stats.reserveA - totalOut);
+        }
+      } else {
+        stats.reserveA = Math.max(0, stats.reserveA - toNumber(event.payload["amountA"] ?? event.payload["amount_a"]));
+        stats.reserveB = Math.max(0, stats.reserveB - toNumber(event.payload["amountB"] ?? event.payload["amount_b"]));
+      }
       const position = this.updatePosition(event, -1);
       if (position) changedPositions.push(position);
     }

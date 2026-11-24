@@ -588,6 +588,7 @@ Defined in [contracts/v2_to_v3_migration/src/lib.rs](../contracts/v2_to_v3_migra
 | 13 | `FactoryNotSet` | A factory-validated entry point ran on an instance with no factory. | Admin calls `set_factory`. |
 | 14 | `NoDefaultPair` | `migrate_default` / `preview_range_default` called with no default pair stored. | Use `migrate` with explicit pools, or admin calls `set_default_pair`. |
 | 15 | `PreviewFailed` | `preview_migration` could not quote the position on the CL pool. | Check the tick range and pool state. |
+| 16 | `InvalidFactory` | The supplied factory does not implement the factory interface. | Pass a valid factory address. |
 
 ---
 

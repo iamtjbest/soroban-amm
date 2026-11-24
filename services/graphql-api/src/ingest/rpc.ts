@@ -495,7 +495,23 @@ export class RpcIngester {
         payload["amountB"] = Number(rawPayload[1] ?? 0);
         payload["shares"] = Number(rawPayload[2] ?? 0);
       }
-    } else if (eventName === "remove_liquidity" || eventName === "rm_liq" || eventName === "rm_liq_1s") {
+    } else if (eventName === "rm_liq_1s") {
+      payload["oneSided"] = true;
+      if (Array.isArray(rawPayload)) {
+        payload["provider"] = asStr(rawPayload[0]);
+        payload["shares"] = Number(rawPayload[1] ?? 0);
+        payload["token_out"] = asStr(rawPayload[2]);
+        payload["total_out"] = Number(rawPayload[3] ?? 0);
+      } else if (typeof rawPayload === "object" && rawPayload !== null) {
+        const obj = rawPayload as Record<string, unknown>;
+        if (obj.provider !== undefined) payload["provider"] = asStr(obj.provider);
+        if (obj.shares !== undefined || obj.shares_burned !== undefined) {
+          payload["shares"] = Number(obj.shares ?? obj.shares_burned ?? 0);
+        }
+        if (obj.token_out !== undefined) payload["token_out"] = asStr(obj.token_out);
+        if (obj.total_out !== undefined) payload["total_out"] = Number(obj.total_out ?? 0);
+      }
+    } else if (eventName === "remove_liquidity" || eventName === "rm_liq") {
       // rawPayload: (provider, shares, amount_a, amount_b) or similar
       if (Array.isArray(rawPayload)) {
         payload["provider"] = asStr(rawPayload[0]);

@@ -173,6 +173,38 @@ test("3. Fixtures for add_liquidity and remove_liquidity decode correctly", asyn
   assert.strictEqual(decodedRm!.payload["amountA"], 2500);
 });
 
+test("3b. Fixture for rm_liq_1s decodes one-sided removal payload correctly without amountA/amountB", async () => {
+  const rm1sFixture = encodeFixture("rm_liq_1s", 1, ["G_PROV", 500, "C_TOKEN_A", 1200]);
+  const rawRm1s: SorobanRpcEvent = {
+    type: "contract",
+    ledger: 102,
+    ledgerClosedAt: new Date().toISOString(),
+    contractId: "C_POOL",
+    id: "evt-rm-1s",
+    pagingToken: "102-1",
+    topic: rm1sFixture.topic,
+    value: rm1sFixture.value,
+    inSuccessfulContractInvocation: true,
+  };
+
+  const ingester = new RpcIngester(
+    { rpcUrl: "https://rpc.test", contractIds: ["C_POOL"] },
+    async () => {},
+    async () => {},
+  );
+
+  const decoded = internals(ingester)._decodeEvent(rawRm1s, "C_POOL");
+  assert.notStrictEqual(decoded, null);
+  assert.strictEqual(decoded!.type, "remove_liquidity");
+  assert.strictEqual(decoded!.payload["provider"], "G_PROV");
+  assert.strictEqual(decoded!.payload["shares"], 500);
+  assert.strictEqual(decoded!.payload["token_out"], "C_TOKEN_A");
+  assert.strictEqual(decoded!.payload["total_out"], 1200);
+  assert.strictEqual(decoded!.payload["oneSided"], true);
+  assert.strictEqual(decoded!.payload["amountA"], undefined);
+  assert.strictEqual(decoded!.payload["amountB"], undefined);
+});
+
 test("4. An event whose data version is higher than supported is rejected. Version equal to supported is accepted", async () => {
   const newerFixture = encodeFixture("swap", 2, [100, 200]);
   const rawNewer: SorobanRpcEvent = {

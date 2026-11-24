@@ -58,6 +58,8 @@ pub enum MigrationError {
     NoDefaultPair = 14,
     /// `preview_migration` could not quote the position on the CL pool.
     PreviewFailed = 15,
+    /// The supplied factory does not implement the factory interface.
+    InvalidFactory = 16,
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -224,6 +226,13 @@ impl MigrationContract {
         }
         admin.require_auth();
 
+        if FactoryClient::new(&env, &factory)
+            .try_is_cl_pool(&env.current_contract_address())
+            .is_err()
+        {
+            return Err(MigrationError::InvalidFactory);
+        }
+
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Factory, &factory);
         Ok(())
@@ -236,6 +245,12 @@ impl MigrationContract {
     pub fn set_factory(env: Env, factory: Address) -> Result<(), MigrationError> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
+        if FactoryClient::new(&env, &factory)
+            .try_is_cl_pool(&env.current_contract_address())
+            .is_err()
+        {
+            return Err(MigrationError::InvalidFactory);
+        }
         env.storage().instance().set(&DataKey::Factory, &factory);
         emit_versioned_event!(env, (Symbol::new(&env, "factory_set"),), (factory,));
         Ok(())
@@ -1433,6 +1448,35 @@ mod tests {
     }
 
     // ── initialize ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_initialize_with_invalid_factory_returns_invalid_factory_and_preserves_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let not_a_factory = Address::generate(&env);
+        let migration_addr = env.register_contract(None, MigrationContract);
+        let client = MigrationContractClient::new(&env, &migration_addr);
+
+        assert_eq!(
+            client.try_initialize(&admin, &not_a_factory),
+            Err(Ok(MigrationError::InvalidFactory))
+        );
+        assert_eq!(client.get_factory(), None);
+    }
+
+    #[test]
+    fn test_set_factory_with_invalid_factory_returns_invalid_factory_and_preserves_stored() {
+        let env = Env::default();
+        let f = fixture(&env);
+
+        let not_a_factory = Address::generate(&env);
+        assert_eq!(
+            f.migration.try_set_factory(&not_a_factory),
+            Err(Ok(MigrationError::InvalidFactory))
+        );
+        assert_eq!(f.migration.get_factory(), Some(f.factory.clone()));
+    }
 
     #[test]
     fn test_initialize_twice_returns_already_initialized() {

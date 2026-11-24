@@ -62,6 +62,17 @@ function removeLiquidityEvent(
   };
 }
 
+function removeLiquidityOneSidedEvent(
+  overrides: Partial<PoolEvent> & { poolId: string; id: string },
+): PoolEvent {
+  return {
+    type: "remove_liquidity",
+    timestamp: NOW,
+    payload: { provider: "P1", shares: 1000, token_out: "XLM", total_out: 2_000, oneSided: true },
+    ...overrides,
+  };
+}
+
 // ── Event indexing ────────────────────────────────────────────────────────
 
 describe("indexEvent", () => {
@@ -115,6 +126,54 @@ describe("indexEvent", () => {
     );
     [stats] = idx.getPoolStats("p1");
     assert.equal(stats.tvl, 0);
+  });
+
+  it("one-sided withdrawal of token A debits reserveA only", () => {
+    const idx = makeIndexer();
+    idx.indexEvent(addLiquidityEvent({ id: "a1", poolId: "p1" })); // reserveA = 10_000, reserveB = 20_000
+    idx.indexEvent(
+      removeLiquidityOneSidedEvent({
+        id: "r1s_a",
+        poolId: "p1",
+        payload: { provider: "P1", shares: 1000, token_out: "XLM", total_out: 3_000, oneSided: true },
+      }),
+    );
+
+    const [stats] = idx.getPoolStats("p1");
+    assert.equal(stats.reserveA, 7_000);
+    assert.equal(stats.reserveB, 20_000);
+  });
+
+  it("one-sided withdrawal of token B debits reserveB only", () => {
+    const idx = makeIndexer();
+    idx.indexEvent(addLiquidityEvent({ id: "a1", poolId: "p1" })); // reserveA = 10_000, reserveB = 20_000
+    idx.indexEvent(
+      removeLiquidityOneSidedEvent({
+        id: "r1s_b",
+        poolId: "p1",
+        payload: { provider: "P1", shares: 1000, token_out: "USDC", total_out: 4_000, oneSided: true },
+      }),
+    );
+
+    const [stats] = idx.getPoolStats("p1");
+    assert.equal(stats.reserveA, 10_000);
+    assert.equal(stats.reserveB, 16_000);
+  });
+
+  it("two-sided remove_liquidity regression debits both reserveA and reserveB", () => {
+    const idx = makeIndexer();
+    idx.indexEvent(addLiquidityEvent({ id: "a1", poolId: "p1" })); // reserveA = 10_000, reserveB = 20_000
+    idx.indexEvent(
+      removeLiquidityEvent({
+        id: "r_reg",
+        poolId: "p1",
+        payload: { amountA: 2_000, amountB: 5_000, tokenA: "XLM", tokenB: "USDC" },
+      }),
+    );
+
+    const [stats] = idx.getPoolStats("p1");
+    assert.equal(stats.reserveA, 8_000);
+    assert.equal(stats.reserveB, 15_000);
   });
 });
 

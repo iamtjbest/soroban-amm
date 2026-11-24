@@ -947,16 +947,24 @@ impl BatchAuction {
         pool_type: PoolType,
         token_in: &Address,
         token_out: &Address,
-    ) -> bool {
+    ) -> Option<(Address, Address)> {
         let (pool_token_a, pool_token_b) = match pool_type {
-            PoolType::Amm => {
-                let info = AmmPoolClient::new(env, pool).get_info();
-                (info.token_a, info.token_b)
-            }
-            PoolType::Cl => ConcentratedLiquidityClient::new(env, pool).get_tokens(),
+            PoolType::Amm => match AmmPoolClient::new(env, pool).try_get_info() {
+                Ok(Ok(info)) => (info.token_a, info.token_b),
+                _ => return None,
+            },
+            PoolType::Cl => match ConcentratedLiquidityClient::new(env, pool).try_get_tokens() {
+                Ok(Ok(tokens)) => tokens,
+                _ => return None,
+            },
         };
-        (token_in == &pool_token_a && token_out == &pool_token_b)
+        if (token_in == &pool_token_a && token_out == &pool_token_b)
             || (token_in == &pool_token_b && token_out == &pool_token_a)
+        {
+            Some((pool_token_a, pool_token_b))
+        } else {
+            None
+        }
     }
 
     /// Validate `pool` as a legitimate settlement venue trading exactly the
@@ -985,11 +993,16 @@ impl BatchAuction {
         token_in: &Address,
         token_out: &Address,
     ) -> Result<(), AuctionError> {
-        if !Self::pool_matches_pair(env, pool, pool_type, token_in, token_out) {
+        if Self::pool_matches_pair(env, pool, pool_type, token_in, token_out).is_none() {
             return Err(AuctionError::InvalidPoolTokenPair);
         }
-        if Self::is_venue_allowed(env.clone(), pool.clone()) {
-            return Ok(());
+        let allowed_type: Option<PoolType> =
+            env.storage().instance().get(&DataKey::Venue(pool.clone()));
+        if let Some(stored_type) = allowed_type {
+            if stored_type == pool_type {
+                return Ok(());
+            }
+            return Err(AuctionError::UnknownVenue);
         }
         let factory: Option<Address> = env.storage().instance().get(&DataKey::Factory);
         let Some(factory) = factory else {
@@ -1037,8 +1050,10 @@ impl BatchAuction {
     /// (e.g. via `remove_venue`), which is orthogonal to whatever tokens that
     /// order recorded at submission time.
     fn venue_is_registered(env: &Env, pool: &Address, pool_type: PoolType) -> bool {
-        if Self::is_venue_allowed(env.clone(), pool.clone()) {
-            return true;
+        let allowed_type: Option<PoolType> =
+            env.storage().instance().get(&DataKey::Venue(pool.clone()));
+        if let Some(stored_type) = allowed_type {
+            return stored_type == pool_type;
         }
         let factory: Option<Address> = env.storage().instance().get(&DataKey::Factory);
         let Some(factory) = factory else {
@@ -2228,6 +2243,182 @@ mod tests {
             100_000_i128
         );
         assert_eq!(client.get_pending_orders().len(), 0);
+    }
+
+    #[test]
+    fn test_submit_order_with_non_contract_pool_returns_typed_error_and_no_escrow() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, _pool, admin) = setup(&env);
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
+        let non_contract_pool = Address::generate(&env);
+
+        let result = client.try_submit_order(
+            &trader,
+            &non_contract_pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &far_future_deadline(&env),
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(Ok(AuctionError::InvalidPoolTokenPair | AuctionError::UnknownVenue))
+            ),
+            "submitting order with non-contract pool must return typed error instead of trapping"
+        );
+        assert_eq!(StellarTokenClient::new(&env, &ta).balance(&trader), 100_000_i128);
+        assert_eq!(StellarTokenClient::new(&env, &ta).balance(&auction_addr), 0_i128);
+    }
+
+    #[test]
+    fn test_submit_order_cl_using_amm_pool_returns_typed_error_and_no_escrow() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, amm_pool, admin) = setup(&env);
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+        client.add_venue(&admin, &amm_pool, &PoolType::Amm);
+
+        let trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
+
+        let result = client.try_submit_order_cl(
+            &trader,
+            &amm_pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &true,
+            &0_u128,
+            &None,
+            &far_future_deadline(&env),
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(Ok(AuctionError::InvalidPoolTokenPair | AuctionError::UnknownVenue))
+            ),
+            "submitting CL order on AMM pool must return typed error"
+        );
+        assert_eq!(StellarTokenClient::new(&env, &ta).balance(&trader), 100_000_i128);
+        assert_eq!(StellarTokenClient::new(&env, &ta).balance(&auction_addr), 0_i128);
+    }
+
+    #[test]
+    fn test_legitimate_amm_and_cl_orders_escrow_and_settle() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, amm_pool, admin) = setup(&env);
+        let cl_pool = deploy_cl_pool(&env, &admin, &ta, &tb);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+        client.add_venue(&admin, &amm_pool, &PoolType::Amm);
+        client.add_venue(&admin, &cl_pool, &PoolType::Cl);
+
+        let trader_amm = Address::generate(&env);
+        let trader_cl = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader_amm, &100_000_i128);
+        StellarAssetClient::new(&env, &ta).mint(&trader_cl, &100_000_i128);
+
+        let order_id_amm = client.submit_order(
+            &trader_amm,
+            &amm_pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &far_future_deadline(&env),
+        );
+        let order_id_cl = client.submit_order_cl(
+            &trader_cl,
+            &cl_pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &true,
+            &0_u128,
+            &None,
+            &far_future_deadline(&env),
+        );
+
+        assert_eq!(order_id_amm, 0);
+        assert_eq!(order_id_cl, 1);
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&auction_addr),
+            20_000_i128
+        );
+
+        env.ledger().set_timestamp(1031);
+        let results = client.settle_batch();
+        assert_eq!(results.len(), 2);
+        assert!(results.get(0).unwrap() > 0);
+        assert!(results.get(1).unwrap() > 0);
+        assert!(StellarTokenClient::new(&env, &tb).balance(&trader_amm) > 0);
+        assert!(StellarTokenClient::new(&env, &tb).balance(&trader_cl) > 0);
+    }
+
+    #[test]
+    fn test_settle_batch_revalidation_when_venue_type_no_longer_matches_does_not_trap() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, amm_pool, admin) = setup(&env);
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+        client.add_venue(&admin, &amm_pool, &PoolType::Amm);
+
+        let trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
+
+        let order_id = client.submit_order(
+            &trader,
+            &amm_pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &far_future_deadline(&env),
+        );
+        assert_eq!(order_id, 0);
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&auction_addr),
+            10_000_i128
+        );
+
+        // Venue type changed in allowlist from Amm to Cl
+        client.add_venue(&admin, &amm_pool, &PoolType::Cl);
+
+        env.ledger().set_timestamp(1031);
+        // Settle batch must not trap: order should be refunded via VenueRemoved
+        let results = client.settle_batch();
+        assert_eq!(results.len(), 0);
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&trader),
+            100_000_i128
+        );
     }
 
     #[test]
